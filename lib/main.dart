@@ -152,10 +152,13 @@ class BluetoothPage extends StatefulWidget {
 class _BluetoothPageState extends State<BluetoothPage> {
   final FlutterBluetoothClassic bluetooth = FlutterBluetoothClassic();
   double sliderValue = 0;
+  double sliderValue2 = 0;
   List<BluetoothDevice> devices = [];
   BluetoothDevice? selectedDevice;
 
   bool isConnected = false;
+  bool isConnecting = false;
+  bool isSendingContinuous = false;
   String receivedData = "";
 
   StreamSubscription? dataSubscription;
@@ -178,53 +181,65 @@ class _BluetoothPageState extends State<BluetoothPage> {
 
   // 🔵 Init Bluetooth
   Future<void> initBluetooth() async {
-    await requestPermissions(); // 🔥 MUST
+    await requestPermissions();
 
     bool isSupported = await bluetooth.isBluetoothSupported();
-    bool isEnabled = await bluetooth.isBluetoothEnabled();
-
     if (!isSupported) {
-      print("Bluetooth not supported");
+      _showSnack("Bluetooth is not supported on this device.");
       return;
     }
 
+    bool isEnabled = await bluetooth.isBluetoothEnabled();
     if (!isEnabled) {
       await bluetooth.enableBluetooth();
     }
 
-    // Get paired devices
-    devices = await bluetooth.getPairedDevices();
+    try {
+      final paired = await bluetooth.getPairedDevices();
+      setState(() => devices = paired);
 
-    print("Devices found: ${devices.length}");
-    for (var d in devices) {
-      print("Device: ${d.name} - ${d.address}");
+      if (devices.isEmpty) {
+        _showSnack("No paired devices found. Pair the HC-05 in Android Bluetooth settings first.");
+      }
+    } catch (e) {
+      _showSnack("Could not load paired devices: $e");
     }
-
-    setState(() {});
   }
 
   // 🔗 Connect
   Future<void> connect() async {
-    if (selectedDevice == null) return;
-
-    bool connected = await bluetooth.connect(selectedDevice!.address);
-
-    if (connected) {
-      setState(() {
-        isConnected = true;
-      });
-
-      // 📥 Listen data
-      dataSubscription = bluetooth.onDataReceived.listen((data) {
-        String msg = data.asString();
-
-        setState(() {
-          receivedData += msg;
-        });
-
-        print("Received: $msg");
-      });
+    if (selectedDevice == null) {
+      _showSnack("Please select a device first.");
+      return;
     }
+
+    setState(() => isConnecting = true);
+
+    try {
+      bool connected = await bluetooth.connect(selectedDevice!.address);
+
+      if (connected) {
+        setState(() => isConnected = true);
+
+        dataSubscription = bluetooth.onDataReceived.listen((data) {
+          String msg = data.asString();
+          setState(() => receivedData += msg);
+        });
+      } else {
+        _showSnack("Failed to connect to ${selectedDevice!.name}. Make sure the HC-05 is powered on and paired.");
+      }
+    } catch (e) {
+      _showSnack("Connection error: $e");
+    } finally {
+      setState(() => isConnecting = false);
+    }
+  }
+
+  void _showSnack(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message), duration: const Duration(seconds: 4)),
+    );
   }
 
   // 📤 Send data
@@ -232,6 +247,24 @@ class _BluetoothPageState extends State<BluetoothPage> {
     if (!isConnected) return;
 
     await bluetooth.sendString(value); // newline important
+  }
+
+  // 🔁 Send Continuous
+  void toggleContinuous() {
+    if (isSendingContinuous) {
+      setState(() => isSendingContinuous = false);
+    } else {
+      setState(() => isSendingContinuous = true);
+      _continuousLoop();
+    }
+  }
+
+  Future<void> _continuousLoop() async {
+    while (isSendingContinuous && isConnected) {
+      await sendData("S1:${sliderValue.round()}\n");
+      await sendData("S2:${sliderValue2.round()}\n");
+      await Future.delayed(const Duration(milliseconds: 200));
+    }
   }
 
   // 🔌 Disconnect
@@ -254,7 +287,7 @@ class _BluetoothPageState extends State<BluetoothPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text("RJ2"),
+        title: const Text("RJ2 - Pete"),
         centerTitle: true,
       ),
 
@@ -294,45 +327,55 @@ class _BluetoothPageState extends State<BluetoothPage> {
               const SizedBox(height: 15),
 
               // 📱 DEVICE SELECT CARD
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12),
-                decoration: BoxDecoration(
-                  border: Border.all(color: Colors.grey.shade300),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: DropdownButton<BluetoothDevice>(
-                  hint: const Text("Select Device"),
-                  value: selectedDevice,
-                  isExpanded: true,
-                  underline: const SizedBox(),
-
-                  items: devices.isEmpty
-                      ? []
-                      : devices.map((d) {
-                    return DropdownMenuItem(
-                      value: d,
-                      child: Text(
-                        d.name ?? d.address,
-                        overflow: TextOverflow.ellipsis,
+              Row(
+                children: [
+                  Expanded(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      decoration: BoxDecoration(
+                        border: Border.all(color: Colors.grey.shade300),
+                        borderRadius: BorderRadius.circular(12),
                       ),
-                    );
-                  }).toList(),
-
-                  onChanged: (d) {
-                    setState(() {
-                      selectedDevice = d;
-                    });
-                  },
-                ),
+                      child: DropdownButton<BluetoothDevice>(
+                        hint: Text(
+                          devices.isEmpty ? "No paired devices found" : "Select Device",
+                        ),
+                        value: selectedDevice,
+                        isExpanded: true,
+                        underline: const SizedBox(),
+                        items: devices.map((d) {
+                          return DropdownMenuItem(
+                            value: d,
+                            child: Text(
+                              d.name,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          );
+                        }).toList(),
+                        onChanged: devices.isEmpty ? null : (d) {
+                          setState(() => selectedDevice = d);
+                        },
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  IconButton(
+                    onPressed: initBluetooth,
+                    icon: const Icon(Icons.refresh),
+                    tooltip: "Refresh paired devices",
+                  ),
+                ],
               ),
 
               const SizedBox(height: 15),
 
               // 🔗 CONNECT BUTTON
               ElevatedButton.icon(
-                onPressed: connect,
-                icon: const Icon(Icons.link),
-                label: const Text("Connect"),
+                onPressed: isConnecting ? null : connect,
+                icon: isConnecting
+                    ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Icon(Icons.link),
+                label: Text(isConnecting ? "Connecting..." : "Connect"),
                 style: ElevatedButton.styleFrom(
                   padding: const EdgeInsets.all(14),
                 ),
@@ -352,7 +395,7 @@ class _BluetoothPageState extends State<BluetoothPage> {
 
               const SizedBox(height: 20),
 
-              // 🎚 SLIDER PANEL
+              // 🎚 SERVO 1 SLIDER PANEL
               Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
@@ -363,7 +406,7 @@ class _BluetoothPageState extends State<BluetoothPage> {
                   children: [
 
                     const Text(
-                      "ANGLE CONTROL",
+                      "SERVO 1 — ANGLE CONTROL",
                       style: TextStyle(
                         fontWeight: FontWeight.bold,
                         letterSpacing: 1,
@@ -380,9 +423,7 @@ class _BluetoothPageState extends State<BluetoothPage> {
                             divisions: 180,
                             label: sliderValue.round().toString(),
                             onChanged: (value) {
-                              setState(() {
-                                sliderValue = value;
-                              });
+                              setState(() => sliderValue = value);
                             },
                           ),
                         ),
@@ -394,10 +435,64 @@ class _BluetoothPageState extends State<BluetoothPage> {
                     ),
 
                     ElevatedButton(
-                      onPressed: () {
-                        sendData("${sliderValue.round()}\n");
-                      },
-                      child: const Text("SEND TO arduino uno R3"),
+                      onPressed: () => sendData("S1:${sliderValue.round()}\n"),
+                      child: const Text("SEND Servo 1"),
+                    ),
+
+                    const SizedBox(height: 8),
+
+                    ElevatedButton(
+                      onPressed: toggleContinuous,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: isSendingContinuous ? Colors.orange : null,
+                      ),
+                      child: Text(isSendingContinuous ? "STOP Continuous" : "Send Continuous"),
+                    ),
+                  ],
+                ),
+              ),
+
+              const SizedBox(height: 10),
+
+              // 🎚 SERVO 2 SLIDER PANEL (Pin 10)
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.blue.shade50,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Column(
+                  children: [
+                    const Text(
+                      "SERVO 2 — ANGLE CONTROL (Pin 10)",
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 1,
+                      ),
+                    ),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Slider(
+                            value: sliderValue2,
+                            min: 0,
+                            max: 180,
+                            divisions: 180,
+                            label: sliderValue2.round().toString(),
+                            onChanged: (value) {
+                              setState(() => sliderValue2 = value);
+                            },
+                          ),
+                        ),
+                        Text(
+                          "${sliderValue2.round()}°",
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                      ],
+                    ),
+                    ElevatedButton(
+                      onPressed: () => sendData("S2:${sliderValue2.round()}\n"),
+                      child: const Text("SEND Servo 2"),
                     ),
                   ],
                 ),
