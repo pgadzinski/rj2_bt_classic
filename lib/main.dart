@@ -40,6 +40,7 @@ class _BluetoothPageState extends State<BluetoothPage> {
   bool isConnected = false;
   bool isConnecting = false;
   bool isSendingContinuous = false;
+  int sendIntervalMs = 1000;
   String receivedData = "";
   final ScrollController _consoleScroll = ScrollController();
 
@@ -157,7 +158,7 @@ class _BluetoothPageState extends State<BluetoothPage> {
           _consoleScroll.jumpTo(_consoleScroll.position.maxScrollExtent);
         }
       });
-      await Future.delayed(const Duration(seconds: 1));
+      await Future.delayed(Duration(milliseconds: sendIntervalMs));
     }
   }
 
@@ -336,6 +337,32 @@ class _BluetoothPageState extends State<BluetoothPage> {
                     ),
 
                     const SizedBox(height: 12),
+
+                    // ⏱ SEND INTERVAL
+                    Row(
+                      children: [
+                        const Text("INTERVAL", style: TextStyle(fontSize: 11, color: Colors.grey)),
+                        Expanded(
+                          child: Slider(
+                            value: sendIntervalMs.toDouble(),
+                            min: 50,
+                            max: 2000,
+                            divisions: 39,
+                            onChanged: (val) => setState(() => sendIntervalMs = val.round()),
+                          ),
+                        ),
+                        SizedBox(
+                          width: 72,
+                          child: Text(
+                            "${sendIntervalMs}ms  ${(1000 / sendIntervalMs).toStringAsFixed(1)}Hz",
+                            style: const TextStyle(fontSize: 11, color: Colors.blue),
+                            textAlign: TextAlign.right,
+                          ),
+                        ),
+                      ],
+                    ),
+
+                    const SizedBox(height: 8),
 
                     // Send Continuous button
                     ElevatedButton(
