@@ -53,6 +53,15 @@ class _BluetoothPageState extends State<BluetoothPage> {
   List<Map<String, dynamic>> recordedFrames = [];
   Timer? recordTimer;
 
+  // ▶ Playback
+  bool isPlaying = false;
+  bool isPaused = false;
+  bool pbLoop = false;
+  double pbSpeed = 1.0;
+  int pbIndex = 0;
+  List<Map<String, dynamic>> pbFrames = [];
+  Timer? pbTimer;
+
   StreamSubscription? dataSubscription;
 
   @override
@@ -219,6 +228,82 @@ class _BluetoothPageState extends State<BluetoothPage> {
     });
   }
 
+  // ▶ Playback
+  void startPlayback() {
+    if (recordedFrames.isEmpty) {
+      _showSnack("No recording to play back.");
+      return;
+    }
+    setState(() {
+      isPlaying = true;
+      isPaused = false;
+      pbIndex = 0;
+      pbFrames = List.from(recordedFrames);
+    });
+    _playbackLoop();
+  }
+
+  Future<void> _playbackLoop() async {
+    while (isPlaying && pbIndex < pbFrames.length) {
+      if (isPaused) {
+        await Future.delayed(const Duration(milliseconds: 50));
+        continue;
+      }
+
+      final frame = pbFrames[pbIndex];
+      final s1 = frame['s1'] as int;
+      final s2 = frame['s2'] as int;
+
+      setState(() {
+        s1Angle = s1.toDouble();
+        s2Angle = s2.toDouble();
+      });
+
+      if (isConnected) {
+        await sendData("S1:$s1\n");
+        await sendData("S2:$s2\n");
+      }
+
+      int delayMs = 100;
+      if (pbIndex < pbFrames.length - 1) {
+        final currentT = frame['t'] as int;
+        final nextT = pbFrames[pbIndex + 1]['t'] as int;
+        delayMs = ((nextT - currentT) / pbSpeed).round().clamp(10, 5000);
+      }
+
+      pbIndex++;
+      setState(() {});
+
+      await Future.delayed(Duration(milliseconds: delayMs));
+    }
+
+    if (!isPlaying) return;
+
+    if (pbLoop) {
+      setState(() => pbIndex = 0);
+      _playbackLoop();
+    } else {
+      setState(() {
+        isPlaying = false;
+        isPaused = false;
+        pbIndex = 0;
+      });
+      _showSnack("Playback complete.");
+    }
+  }
+
+  void pauseResumePlayback() {
+    setState(() => isPaused = !isPaused);
+  }
+
+  void stopPlayback() {
+    setState(() {
+      isPlaying = false;
+      isPaused = false;
+      pbIndex = 0;
+    });
+  }
+
   // 🔌 Disconnect
   Future<void> disconnect() async {
     await bluetooth.disconnect();
@@ -228,6 +313,9 @@ class _BluetoothPageState extends State<BluetoothPage> {
       isConnected = false;
       isSendingContinuous = false;
       isRecording = false;
+      isPlaying = false;
+      isPaused = false;
+      pbIndex = 0;
     });
   }
 
@@ -519,6 +607,117 @@ class _BluetoothPageState extends State<BluetoothPage> {
                           onPressed: recordedFrames.isNotEmpty && !isRecording ? clearRecording : null,
                           icon: const Icon(Icons.delete_outline),
                           tooltip: "Clear recording",
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+
+              const SizedBox(height: 12),
+
+              // ▶ PLAYBACK
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: isPlaying ? Colors.blue.shade50 : Colors.grey.shade100,
+                  borderRadius: BorderRadius.circular(12),
+                  border: isPlaying ? Border.all(color: Colors.blue.shade300) : null,
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text("PLAYBACK", style: TextStyle(fontWeight: FontWeight.bold, letterSpacing: 1)),
+                        if (recordedFrames.isNotEmpty)
+                          Text(
+                            isPlaying ? "Frame ${pbIndex} / ${pbFrames.length}" : "${recordedFrames.length} frames ready",
+                            style: TextStyle(fontSize: 11, color: isPlaying ? Colors.blue : Colors.grey),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+
+                    // Progress bar
+                    if (isPlaying)
+                      LinearProgressIndicator(
+                        value: pbFrames.isEmpty ? 0 : pbIndex / pbFrames.length,
+                        backgroundColor: Colors.blue.shade100,
+                        color: Colors.blue,
+                      ),
+                    if (isPlaying) const SizedBox(height: 8),
+
+                    // Speed slider
+                    Row(
+                      children: [
+                        const Text("SPEED", style: TextStyle(fontSize: 11, color: Colors.grey)),
+                        Expanded(
+                          child: Slider(
+                            value: pbSpeed,
+                            min: 0.25,
+                            max: 4.0,
+                            divisions: 15,
+                            onChanged: (val) => setState(() => pbSpeed = val),
+                          ),
+                        ),
+                        SizedBox(
+                          width: 40,
+                          child: Text(
+                            "${pbSpeed.toStringAsFixed(2)}x",
+                            style: const TextStyle(fontSize: 11, color: Colors.blue),
+                            textAlign: TextAlign.right,
+                          ),
+                        ),
+                      ],
+                    ),
+
+                    const SizedBox(height: 4),
+
+                    // Loop toggle
+                    Row(
+                      children: [
+                        const Text("LOOP", style: TextStyle(fontSize: 11, color: Colors.grey)),
+                        const SizedBox(width: 8),
+                        Switch(
+                          value: pbLoop,
+                          onChanged: (val) => setState(() => pbLoop = val),
+                        ),
+                      ],
+                    ),
+
+                    const SizedBox(height: 8),
+
+                    // Controls
+                    Row(
+                      children: [
+                        Expanded(
+                          child: ElevatedButton.icon(
+                            onPressed: recordedFrames.isEmpty
+                                ? null
+                                : isPlaying
+                                    ? pauseResumePlayback
+                                    : startPlayback,
+                            icon: Icon(isPlaying
+                                ? (isPaused ? Icons.play_arrow : Icons.pause)
+                                : Icons.play_arrow),
+                            label: Text(isPlaying
+                                ? (isPaused ? "RESUME" : "PAUSE")
+                                : "PLAY"),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: isPlaying && !isPaused ? Colors.blue : null,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: ElevatedButton.icon(
+                            onPressed: isPlaying ? stopPlayback : null,
+                            icon: const Icon(Icons.stop),
+                            label: const Text("STOP"),
+                            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+                          ),
                         ),
                       ],
                     ),
