@@ -1,8 +1,11 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_bluetooth_classic_serial/flutter_bluetooth_classic.dart';
 import 'package:flutter_joystick/flutter_joystick.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:share_plus/share_plus.dart';
 
 void main() {
   runApp(const MyApp());
@@ -43,6 +46,12 @@ class _BluetoothPageState extends State<BluetoothPage> {
   int sendIntervalMs = 1000;
   String receivedData = "";
   final ScrollController _consoleScroll = ScrollController();
+
+  // 🎙 Recording
+  bool isRecording = false;
+  int recordIntervalMs = 500;
+  List<Map<String, dynamic>> recordedFrames = [];
+  Timer? recordTimer;
 
   StreamSubscription? dataSubscription;
 
@@ -162,19 +171,70 @@ class _BluetoothPageState extends State<BluetoothPage> {
     }
   }
 
+  // 🎙 Recording
+  void toggleRecording() {
+    if (isRecording) {
+      recordTimer?.cancel();
+      setState(() => isRecording = false);
+      _showSnack("Recording stopped — ${recordedFrames.length} frames captured.");
+    } else {
+      setState(() {
+        isRecording = true;
+        recordedFrames = [];
+      });
+      recordTimer = Timer.periodic(Duration(milliseconds: recordIntervalMs), (_) {
+        recordedFrames.add({
+          't': DateTime.now().millisecondsSinceEpoch,
+          's1': s1Angle.round(),
+          's2': s2Angle.round(),
+        });
+        setState(() {});
+      });
+      _showSnack("Recording started.");
+    }
+  }
+
+  Future<void> exportRecording() async {
+    if (recordedFrames.isEmpty) {
+      _showSnack("Nothing to export.");
+      return;
+    }
+    final t0 = recordedFrames.first['t'] as int;
+    final lines = ['elapsed_ms,s1_deg,s2_deg'];
+    for (final f in recordedFrames) {
+      lines.add('${f['t'] - t0},${f['s1']},${f['s2']}');
+    }
+    final csv = lines.join('\n');
+    final dir = await getApplicationDocumentsDirectory();
+    final file = File('${dir.path}/rj2_motion_${DateTime.now().millisecondsSinceEpoch}.csv');
+    await file.writeAsString(csv);
+    await Share.shareXFiles([XFile(file.path)], text: 'RJ2 Motion Recording');
+  }
+
+  void clearRecording() {
+    recordTimer?.cancel();
+    setState(() {
+      isRecording = false;
+      recordedFrames = [];
+    });
+  }
+
   // 🔌 Disconnect
   Future<void> disconnect() async {
     await bluetooth.disconnect();
     dataSubscription?.cancel();
+    recordTimer?.cancel();
     setState(() {
       isConnected = false;
       isSendingContinuous = false;
+      isRecording = false;
     });
   }
 
   @override
   void dispose() {
     dataSubscription?.cancel();
+    recordTimer?.cancel();
     _consoleScroll.dispose();
     super.dispose();
   }
@@ -187,7 +247,7 @@ class _BluetoothPageState extends State<BluetoothPage> {
         centerTitle: true,
       ),
       body: SafeArea(
-        child: Padding(
+        child: SingleChildScrollView(
           padding: const EdgeInsets.all(16),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -379,8 +439,98 @@ class _BluetoothPageState extends State<BluetoothPage> {
 
               const SizedBox(height: 12),
 
+              // 🎙 MOTION RECORDER
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: isRecording ? Colors.red.shade50 : Colors.grey.shade100,
+                  borderRadius: BorderRadius.circular(12),
+                  border: isRecording ? Border.all(color: Colors.red.shade300) : null,
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text("MOTION RECORDER", style: TextStyle(fontWeight: FontWeight.bold, letterSpacing: 1)),
+                        if (isRecording)
+                          Row(children: [
+                            const Icon(Icons.circle, color: Colors.red, size: 10),
+                            const SizedBox(width: 4),
+                            Text("${recordedFrames.length} frames", style: const TextStyle(fontSize: 11, color: Colors.red)),
+                          ])
+                        else if (recordedFrames.isNotEmpty)
+                          Text("${recordedFrames.length} frames", style: const TextStyle(fontSize: 11, color: Colors.grey)),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+
+                    // Record interval slider
+                    Row(
+                      children: [
+                        const Text("REC INTERVAL", style: TextStyle(fontSize: 11, color: Colors.grey)),
+                        Expanded(
+                          child: Slider(
+                            value: recordIntervalMs.toDouble(),
+                            min: 100,
+                            max: 2000,
+                            divisions: 19,
+                            onChanged: isRecording ? null : (val) => setState(() => recordIntervalMs = val.round()),
+                          ),
+                        ),
+                        SizedBox(
+                          width: 52,
+                          child: Text(
+                            "${recordIntervalMs}ms",
+                            style: const TextStyle(fontSize: 11, color: Colors.blue),
+                            textAlign: TextAlign.right,
+                          ),
+                        ),
+                      ],
+                    ),
+
+                    const SizedBox(height: 8),
+
+                    // Buttons
+                    Row(
+                      children: [
+                        Expanded(
+                          child: ElevatedButton.icon(
+                            onPressed: toggleRecording,
+                            icon: Icon(isRecording ? Icons.stop : Icons.fiber_manual_record),
+                            label: Text(isRecording ? "STOP" : "RECORD"),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: isRecording ? Colors.red : null,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: ElevatedButton.icon(
+                            onPressed: recordedFrames.isNotEmpty && !isRecording ? exportRecording : null,
+                            icon: const Icon(Icons.upload_file),
+                            label: const Text("EXPORT"),
+                            style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        IconButton(
+                          onPressed: recordedFrames.isNotEmpty && !isRecording ? clearRecording : null,
+                          icon: const Icon(Icons.delete_outline),
+                          tooltip: "Clear recording",
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+
+              const SizedBox(height: 12),
+
               // 📥 DATA CONSOLE
-              Expanded(
+              SizedBox(
+                height: 180,
                 child: Container(
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
@@ -396,6 +546,7 @@ class _BluetoothPageState extends State<BluetoothPage> {
                   ),
                 ),
               ),
+              const SizedBox(height: 16),
             ],
           ),
         ),
