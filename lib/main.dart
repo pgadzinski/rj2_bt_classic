@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_bluetooth_classic_serial/flutter_bluetooth_classic.dart';
@@ -226,6 +227,54 @@ class _BluetoothPageState extends State<BluetoothPage> {
       isRecording = false;
       recordedFrames = [];
     });
+  }
+
+  // 📋 JSON
+  Map<String, dynamic> _buildJson() {
+    final t0 = recordedFrames.isNotEmpty ? recordedFrames.first['t'] as int : 0;
+    return {
+      'name': 'RJ2 Recording',
+      'created': DateTime.now().toIso8601String(),
+      'frames': recordedFrames.map((f) => {
+        't': (f['t'] as int) - t0,
+        's1': f['s1'],
+        's2': f['s2'],
+      }).toList(),
+    };
+  }
+
+  void _showJsonDialog() {
+    if (recordedFrames.isEmpty) {
+      _showSnack("No recording to show.");
+      return;
+    }
+    final json = const JsonEncoder.withIndent('  ').convert(_buildJson());
+    showDialog(
+      context: context,
+      builder: (ctx) => Dialog(
+        insetPadding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            AppBar(
+              title: const Text("Raw JSON"),
+              automaticallyImplyLeading: false,
+              actions: [
+                IconButton(icon: const Icon(Icons.close), onPressed: () => Navigator.pop(ctx)),
+              ],
+            ),
+            Expanded(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(12),
+                child: SelectableText(
+                  json,
+                  style: const TextStyle(fontFamily: "monospace", fontSize: 12),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   // ▶ Playback
@@ -603,6 +652,11 @@ class _BluetoothPageState extends State<BluetoothPage> {
                           ),
                         ),
                         const SizedBox(width: 8),
+                        IconButton(
+                          onPressed: recordedFrames.isNotEmpty && !isRecording ? _showJsonDialog : null,
+                          icon: const Icon(Icons.data_object),
+                          tooltip: "View raw JSON",
+                        ),
                         IconButton(
                           onPressed: recordedFrames.isNotEmpty && !isRecording ? clearRecording : null,
                           icon: const Icon(Icons.delete_outline),
