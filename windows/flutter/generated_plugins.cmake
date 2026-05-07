@@ -3,7 +3,7 @@
 #
 
 list(APPEND FLUTTER_PLUGIN_LIST
-  flutter_bluetooth_classic_serial
+  flutter_blue_plus_winrt
   permission_handler_windows
 )
 

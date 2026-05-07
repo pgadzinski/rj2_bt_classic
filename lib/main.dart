@@ -1,130 +1,15 @@
-// import 'package:flutter/material.dart';
-//
-// void main() {
-//   runApp(const MyApp());
-// }
-//
-// class MyApp extends StatelessWidget {
-//   const MyApp({super.key});
-//
-//   // This widget is the root of your application.
-//   @override
-//   Widget build(BuildContext context) {
-//     return MaterialApp(
-//       title: 'Flutter Demo',
-//       theme: ThemeData(
-//         // This is the theme of your application.
-//         //
-//         // TRY THIS: Try running your application with "flutter run". You'll see
-//         // the application has a purple toolbar. Then, without quitting the app,
-//         // try changing the seedColor in the colorScheme below to Colors.green
-//         // and then invoke "hot reload" (save your changes or press the "hot
-//         // reload" button in a Flutter-supported IDE, or press "r" if you used
-//         // the command line to start the app).
-//         //
-//         // Notice that the counter didn't reset back to zero; the application
-//         // state is not lost during the reload. To reset the state, use hot
-//         // restart instead.
-//         //
-//         // This works for code too, not just values: Most code changes can be
-//         // tested with just a hot reload.
-//         colorScheme: .fromSeed(seedColor: Colors.deepPurple),
-//       ),
-//       home: const MyHomePage(title: 'Flutter Demo Home Page'),
-//     );
-//   }
-// }
-//
-// class MyHomePage extends StatefulWidget {
-//   const MyHomePage({super.key, required this.title});
-//
-//   // This widget is the home page of your application. It is stateful, meaning
-//   // that it has a State object (defined below) that contains fields that affect
-//   // how it looks.
-//
-//   // This class is the configuration for the state. It holds the values (in this
-//   // case the title) provided by the parent (in this case the App widget) and
-//   // used by the build method of the State. Fields in a Widget subclass are
-//   // always marked "final".
-//
-//   final String title;
-//
-//   @override
-//   State<MyHomePage> createState() => _MyHomePageState();
-// }
-//
-// class _MyHomePageState extends State<MyHomePage> {
-//   int _counter = 0;
-//
-//   void _incrementCounter() {
-//     setState(() {
-//       // This call to setState tells the Flutter framework that something has
-//       // changed in this State, which causes it to rerun the build method below
-//       // so that the display can reflect the updated values. If we changed
-//       // _counter without calling setState(), then the build method would not be
-//       // called again, and so nothing would appear to happen.
-//       _counter++;
-//     });
-//   }
-//
-//   @override
-//   Widget build(BuildContext context) {
-//     // This method is rerun every time setState is called, for instance as done
-//     // by the _incrementCounter method above.
-//     //
-//     // The Flutter framework has been optimized to make rerunning build methods
-//     // fast, so that you can just rebuild anything that needs updating rather
-//     // than having to individually change instances of widgets.
-//     return Scaffold(
-//       appBar: AppBar(
-//         // TRY THIS: Try changing the color here to a specific color (to
-//         // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-//         // change color while the other colors stay the same.
-//         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-//         // Here we take the value from the MyHomePage object that was created by
-//         // the App.build method, and use it to set our appbar title.
-//         title: Text(widget.title),
-//       ),
-//       body: Center(
-//         // Center is a layout widget. It takes a single child and positions it
-//         // in the middle of the parent.
-//         child: Column(
-//           // Column is also a layout widget. It takes a list of children and
-//           // arranges them vertically. By default, it sizes itself to fit its
-//           // children horizontally, and tries to be as tall as its parent.
-//           //
-//           // Column has various properties to control how it sizes itself and
-//           // how it positions its children. Here we use mainAxisAlignment to
-//           // center the children vertically; the main axis here is the vertical
-//           // axis because Columns are vertical (the cross axis would be
-//           // horizontal).
-//           //
-//           // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-//           // action in the IDE, or press "p" in the console), to see the
-//           // wireframe for each widget.
-//           mainAxisAlignment: .center,
-//           children: [
-//             const Text('You have pushed the button this many times:'),
-//             Text(
-//               '$_counter',
-//               style: Theme.of(context).textTheme.headlineMedium,
-//             ),
-//           ],
-//         ),
-//       ),
-//       floatingActionButton: FloatingActionButton(
-//         onPressed: _incrementCounter,
-//         tooltip: 'Increment',
-//         child: const Icon(Icons.add),
-//       ),
-//     );
-//   }
-// }
-
 import 'dart:async';
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
-import 'package:flutter_bluetooth_classic_serial/flutter_bluetooth_classic.dart';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
+
+/// Custom GATT service exposed by the peripheral (Arduino / BLE module).
+const String kServiceUuid = '12345678-1234-1234-1234-1234567890ab';
+
+/// Writable (and optionally notifiable) characteristic for commands and telemetry.
+const String kCharacteristicUuid = 'abcd1234-5678-1234-5678-abcdef123456';
 
 void main() {
   runApp(const MyApp());
@@ -150,15 +35,34 @@ class BluetoothPage extends StatefulWidget {
 }
 
 class _BluetoothPageState extends State<BluetoothPage> {
-  final FlutterBluetoothClassic bluetooth = FlutterBluetoothClassic();
-  double sliderValue = 0;
+  // --- BLE UUIDs as [Guid] for comparisons against discovered services/chars ---
+  static final Guid _gattService = Guid(kServiceUuid);
+  static final Guid _gattCharacteristic = Guid(kCharacteristicUuid);
+
+  /// Devices seen during the current / last scan (deduped by [BluetoothDevice.remoteId]).
   List<BluetoothDevice> devices = [];
+
   BluetoothDevice? selectedDevice;
 
-  bool isConnected = false;
-  String receivedData = "";
+  /// After GATT setup, holds the TX characteristic used for `S1:angle` writes.
+  BluetoothCharacteristic? _commandCharacteristic;
 
-  StreamSubscription? dataSubscription;
+  double sliderValue = 0;
+
+  bool isConnected = false;
+  String receivedData = '';
+
+  /// True while the stack reports an active scan.
+  bool isScanning = false;
+
+  /// Host adapter on/off/unknown — drives permission and scan behavior.
+  BluetoothAdapterState adapterState = BluetoothAdapterState.unknown;
+
+  StreamSubscription<List<ScanResult>>? _scanResultsSubscription;
+  StreamSubscription<BluetoothAdapterState>? _adapterSubscription;
+  StreamSubscription<bool>? _scanningSubscription;
+  StreamSubscription<BluetoothConnectionState>? _connectionSubscription;
+  StreamSubscription<List<int>>? _notifySubscription;
 
   @override
   void initState() {
@@ -166,7 +70,7 @@ class _BluetoothPageState extends State<BluetoothPage> {
     initBluetooth();
   }
 
-  // 🔐 Runtime Permissions
+  /// Android / runtime BLE-related permissions (location still commonly required for scan on older stacks).
   Future<void> requestPermissions() async {
     await [
       Permission.bluetooth,
@@ -176,115 +80,294 @@ class _BluetoothPageState extends State<BluetoothPage> {
     ].request();
   }
 
-  // 🔵 Init Bluetooth
+  String _deviceLabel(BluetoothDevice d) {
+    if (d.platformName.isNotEmpty) return d.platformName;
+    if (d.advName.isNotEmpty) return d.advName;
+    return d.remoteId.str;
+  }
+
+  /// [DropdownButton] must reference the same instance as in [items], so resolve by [remoteId].
+  BluetoothDevice? _dropdownValue() {
+    if (selectedDevice == null) return null;
+    for (final d in devices) {
+      if (d.remoteId == selectedDevice!.remoteId) return d;
+    }
+    return null;
+  }
+
+  /// Subscribe to adapter state, scan results, and scanning flag; kick off first scan when radio is on.
   Future<void> initBluetooth() async {
-    await requestPermissions(); // 🔥 MUST
+    await requestPermissions();
 
-    bool isSupported = await bluetooth.isBluetoothSupported();
-    bool isEnabled = await bluetooth.isBluetoothEnabled();
-
-    if (!isSupported) {
-      print("Bluetooth not supported");
+    final supported = await FlutterBluePlus.isSupported;
+    if (!supported) {
+      debugPrint('Bluetooth LE not supported on this device');
       return;
     }
 
-    if (!isEnabled) {
-      await bluetooth.enableBluetooth();
+    _adapterSubscription = FlutterBluePlus.adapterState.listen((state) {
+      if (!mounted) return;
+      setState(() => adapterState = state);
+      if (state == BluetoothAdapterState.on) {
+        unawaited(_startScan());
+      }
+    });
+
+    _scanResultsSubscription = FlutterBluePlus.scanResults.listen((results) {
+      if (!mounted) return;
+      final byId = <String, BluetoothDevice>{};
+      for (final r in results) {
+        byId[r.device.remoteId.str] = r.device;
+      }
+      final list = byId.values.toList()
+        ..sort((a, b) => _deviceLabel(a).toLowerCase().compareTo(_deviceLabel(b).toLowerCase()));
+      setState(() => devices = list);
+    });
+
+    _scanningSubscription = FlutterBluePlus.isScanning.listen((scanning) {
+      if (!mounted) return;
+      setState(() => isScanning = scanning);
+    });
+
+    // Turn radio on (Android); no-op / unsupported elsewhere.
+    if (FlutterBluePlus.adapterStateNow == BluetoothAdapterState.off) {
+      try {
+        await FlutterBluePlus.turnOn();
+      } catch (e) {
+        debugPrint('Could not turn Bluetooth on: $e');
+      }
+    } else {
+      await _startScan();
     }
-
-    // Get paired devices
-    devices = await bluetooth.getPairedDevices();
-
-    print("Devices found: ${devices.length}");
-    for (var d in devices) {
-      print("Device: ${d.name} - ${d.address}");
-    }
-
-    setState(() {});
   }
 
-  // 🔗 Connect
+  /// Starts a finite scan so the dropdown fills with nearby peripherals.
+  Future<void> _startScan() async {
+    if (adapterState != BluetoothAdapterState.on) return;
+    try {
+      // Scan all peripherals; the custom service UUID is matched after connect in [_setupGatt].
+      // To narrow results, pass `withServices: [_gattService]` if your board advertises that UUID.
+      await FlutterBluePlus.startScan(
+        timeout: const Duration(seconds: 15),
+      );
+    } catch (e) {
+      debugPrint('startScan error: $e');
+    }
+  }
+
+  /// Public so the UI can offer a manual “Scan again” action.
+  Future<void> scanDevices() => _startScan();
+
+  /// Finds the command characteristic, enables notifications when available, and wires disconnect cleanup.
+  Future<void> _setupGatt(BluetoothDevice device) async {
+    await device.discoverServices();
+
+    BluetoothCharacteristic? target;
+    for (final service in device.servicesList) {
+      if (service.uuid != _gattService) continue;
+      for (final c in service.characteristics) {
+        if (c.uuid == _gattCharacteristic) {
+          target = c;
+          break;
+        }
+      }
+      if (target != null) break;
+    }
+
+    if (target == null) {
+      throw FlutterBluePlusException(
+        ErrorPlatform.fbp,
+        'setupGatt',
+        FbpErrorCode.characteristicNotFound.index,
+        'Service $kServiceUuid or characteristic $kCharacteristicUuid not found',
+      );
+    }
+
+    _commandCharacteristic = target;
+    await _subscribeNotificationsIfNeeded(target);
+  }
+
+  /// Subscribes to NOTIFY / INDICATE so the console can show remote data when the firmware supports it.
+  Future<void> _subscribeNotificationsIfNeeded(BluetoothCharacteristic ch) async {
+    await _notifySubscription?.cancel();
+    _notifySubscription = null;
+
+    final props = ch.properties;
+    if (!props.notify && !props.indicate) {
+      debugPrint('Characteristic has no notify/indicate; console will only show local writes if any.');
+      return;
+    }
+
+    await ch.setNotifyValue(true);
+    _notifySubscription = ch.onValueReceived.listen((value) {
+      if (!mounted) return;
+      final msg = utf8.decode(value, allowMalformed: true);
+      setState(() => receivedData += msg);
+      debugPrint('Received: $msg');
+    });
+  }
+
+  void _listenForDisconnect(BluetoothDevice device) {
+    _connectionSubscription?.cancel();
+    _connectionSubscription = device.connectionState.listen((state) {
+      if (state == BluetoothConnectionState.disconnected) {
+        _tearDownSession();
+      }
+    });
+  }
+
+  /// Clears GATT state and subscriptions after a drop or explicit disconnect.
+  void _tearDownSession() {
+    _notifySubscription?.cancel();
+    _notifySubscription = null;
+    _connectionSubscription?.cancel();
+    _connectionSubscription = null;
+    _commandCharacteristic = null;
+    if (mounted) {
+      setState(() => isConnected = false);
+    }
+  }
+
+  /// Connect, discover service/characteristic, then mark ready for writes.
   Future<void> connect() async {
     if (selectedDevice == null) return;
+    if (adapterState != BluetoothAdapterState.on) {
+      debugPrint('Bluetooth adapter is not on');
+      return;
+    }
 
-    bool connected = await bluetooth.connect(selectedDevice!.address);
+    try {
+      await FlutterBluePlus.stopScan();
+      final device = selectedDevice!;
 
-    if (connected) {
-      setState(() {
-        isConnected = true;
-      });
+      await device.connect(
+        license: License.free,
+        timeout: const Duration(seconds: 35),
+        mtu: null,
+      );
 
-      // 📥 Listen data
-      dataSubscription = bluetooth.onDataReceived.listen((data) {
-        String msg = data.asString();
+      await _setupGatt(device);
+      _listenForDisconnect(device);
 
-        setState(() {
-          receivedData += msg;
-        });
-
-        print("Received: $msg");
-      });
+      if (mounted) setState(() => isConnected = true);
+    } on FlutterBluePlusException catch (e) {
+      debugPrint('connect failed: $e');
+      _tearDownSession();
+      try {
+        await selectedDevice?.disconnect();
+      } catch (_) {}
+    } catch (e) {
+      debugPrint('connect failed: $e');
+      _tearDownSession();
+      try {
+        await selectedDevice?.disconnect();
+      } catch (_) {}
     }
   }
 
-  // 📤 Send data
-  Future<void> sendData(String value) async {
-    if (!isConnected) return;
+  /// Disconnect from the peripheral and release notify subscription.
+  Future<void> disconnect() async {
+    await _notifySubscription?.cancel();
+    _notifySubscription = null;
+    _connectionSubscription?.cancel();
+    _connectionSubscription = null;
+    _commandCharacteristic = null;
 
-    await bluetooth.sendString(value); // newline important
+    try {
+      await selectedDevice?.disconnect();
+    } catch (e) {
+      debugPrint('disconnect: $e');
+    }
+
+    if (mounted) setState(() => isConnected = false);
   }
 
-  // 🔌 Disconnect
-  Future<void> disconnect() async {
-    await bluetooth.disconnect();
-    dataSubscription?.cancel();
+  /// Sends `S1:<angle>\\n` over BLE write (same semantics as before: one slider → servo 1).
+  Future<void> sendData(String value) async {
+    if (!isConnected || _commandCharacteristic == null) return;
 
-    setState(() {
-      isConnected = false;
-    });
+    final ch = _commandCharacteristic!;
+    final bytes = utf8.encode(value);
+    final props = ch.properties;
+
+    // Prefer write-with-response when available for reliability.
+    final bool withoutResponse = props.writeWithoutResponse && !props.write;
+
+    try {
+      await ch.write(bytes, withoutResponse: withoutResponse);
+    } catch (e) {
+      debugPrint('write failed: $e');
+    }
   }
 
   @override
   void dispose() {
-    dataSubscription?.cancel();
+    _scanResultsSubscription?.cancel();
+    _adapterSubscription?.cancel();
+    _scanningSubscription?.cancel();
+    _notifySubscription?.cancel();
+    _connectionSubscription?.cancel();
+    unawaited(FlutterBluePlus.stopScan());
+    if (selectedDevice?.isConnected ?? false) {
+      unawaited(selectedDevice!.disconnect());
+    }
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    final adapterOk = adapterState == BluetoothAdapterState.on;
+    final statusColor = !adapterOk
+        ? Colors.orange.shade100
+        : isConnected
+            ? Colors.green.shade100
+            : Colors.red.shade100;
+    final statusIconColor = !adapterOk
+        ? Colors.orange
+        : isConnected
+            ? Colors.green
+            : Colors.red;
+    final statusText = !adapterOk
+        ? 'ADAPTER OFF'
+        : isConnected
+            ? 'CONNECTED'
+            : 'DISCONNECTED';
+
     return Scaffold(
       appBar: AppBar(
-        title: const Text("RJ2"),
+        title: const Text('RJ2'),
         centerTitle: true,
       ),
-
       body: SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(16),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-
-              // 🔵 STATUS CARD
+              // Status: adapter + GATT session
               Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
-                  color: isConnected ? Colors.green.shade100 : Colors.red.shade100,
+                  color: statusColor,
                   borderRadius: BorderRadius.circular(12),
                 ),
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
                     Icon(
-                      isConnected ? Icons.bluetooth_connected : Icons.bluetooth_disabled,
-                      color: isConnected ? Colors.green : Colors.red,
+                      !adapterOk
+                          ? Icons.bluetooth_disabled
+                          : isConnected
+                              ? Icons.bluetooth_connected
+                              : Icons.bluetooth_disabled,
+                      color: statusIconColor,
                     ),
                     const SizedBox(width: 10),
                     Text(
-                      isConnected ? "CONNECTED" : "DISCONNECTED",
+                      statusText,
                       style: TextStyle(
                         fontWeight: FontWeight.bold,
-                        color: isConnected ? Colors.green : Colors.red,
+                        color: statusIconColor,
                       ),
                     ),
                   ],
@@ -293,7 +376,27 @@ class _BluetoothPageState extends State<BluetoothPage> {
 
               const SizedBox(height: 15),
 
-              // 📱 DEVICE SELECT CARD
+              // Scan + device picker
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: (!adapterOk || isScanning) ? null : () => scanDevices(),
+                      icon: isScanning
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.radar),
+                      label: Text(isScanning ? 'Scanning…' : 'Scan BLE'),
+                    ),
+                  ),
+                ],
+              ),
+
+              const SizedBox(height: 10),
+
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 12),
                 decoration: BoxDecoration(
@@ -301,38 +404,33 @@ class _BluetoothPageState extends State<BluetoothPage> {
                   borderRadius: BorderRadius.circular(12),
                 ),
                 child: DropdownButton<BluetoothDevice>(
-                  hint: const Text("Select Device"),
-                  value: selectedDevice,
+                  hint: const Text('Select Device'),
+                  value: _dropdownValue(),
                   isExpanded: true,
                   underline: const SizedBox(),
-
                   items: devices.isEmpty
                       ? []
                       : devices.map((d) {
-                    return DropdownMenuItem(
-                      value: d,
-                      child: Text(
-                        d.name ?? d.address,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    );
-                  }).toList(),
-
+                          return DropdownMenuItem(
+                            value: d,
+                            child: Text(
+                              _deviceLabel(d),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          );
+                        }).toList(),
                   onChanged: (d) {
-                    setState(() {
-                      selectedDevice = d;
-                    });
+                    setState(() => selectedDevice = d);
                   },
                 ),
               ),
 
               const SizedBox(height: 15),
 
-              // 🔗 CONNECT BUTTON
               ElevatedButton.icon(
-                onPressed: connect,
+                onPressed: (!adapterOk || selectedDevice == null || isConnected) ? null : connect,
                 icon: const Icon(Icons.link),
-                label: const Text("Connect"),
+                label: const Text('Connect'),
                 style: ElevatedButton.styleFrom(
                   padding: const EdgeInsets.all(14),
                 ),
@@ -341,9 +439,9 @@ class _BluetoothPageState extends State<BluetoothPage> {
               const SizedBox(height: 10),
 
               ElevatedButton.icon(
-                onPressed: disconnect,
+                onPressed: !isConnected ? null : disconnect,
                 icon: const Icon(Icons.link_off),
-                label: const Text("Disconnect"),
+                label: const Text('Disconnect'),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.red,
                   padding: const EdgeInsets.all(14),
@@ -352,7 +450,7 @@ class _BluetoothPageState extends State<BluetoothPage> {
 
               const SizedBox(height: 20),
 
-              // 🎚 SLIDER PANEL
+              // Slider panel (unchanged behavior: set angle, send on button)
               Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
@@ -361,15 +459,13 @@ class _BluetoothPageState extends State<BluetoothPage> {
                 ),
                 child: Column(
                   children: [
-
                     const Text(
-                      "ANGLE CONTROL",
+                      'ANGLE CONTROL',
                       style: TextStyle(
                         fontWeight: FontWeight.bold,
                         letterSpacing: 1,
                       ),
                     ),
-
                     Row(
                       children: [
                         Expanded(
@@ -380,24 +476,22 @@ class _BluetoothPageState extends State<BluetoothPage> {
                             divisions: 180,
                             label: sliderValue.round().toString(),
                             onChanged: (value) {
-                              setState(() {
-                                sliderValue = value;
-                              });
+                              setState(() => sliderValue = value);
                             },
                           ),
                         ),
                         Text(
-                          "${sliderValue.round()}°",
+                          '${sliderValue.round()}°',
                           style: const TextStyle(fontWeight: FontWeight.bold),
                         ),
                       ],
                     ),
-
                     ElevatedButton(
                       onPressed: () {
-                        sendData("${sliderValue.round()}\n");
+                        // Protocol: S1:<deg>\n (S2 would be a second channel, e.g. another slider)
+                        sendData('S1:${sliderValue.round()}\n');
                       },
-                      child: const Text("SEND TO arduino uno R3"),
+                      child: const Text('SEND TO arduino uno R3'),
                     ),
                   ],
                 ),
@@ -405,7 +499,6 @@ class _BluetoothPageState extends State<BluetoothPage> {
 
               const SizedBox(height: 15),
 
-              // 📥 DATA CONSOLE
               Expanded(
                 child: Container(
                   padding: const EdgeInsets.all(12),
@@ -415,12 +508,10 @@ class _BluetoothPageState extends State<BluetoothPage> {
                   ),
                   child: SingleChildScrollView(
                     child: Text(
-                      receivedData.isEmpty
-                          ? "Waiting for arduino uno R3 data..."
-                          : receivedData,
+                      receivedData.isEmpty ? 'Waiting for arduino uno R3 data...' : receivedData,
                       style: const TextStyle(
                         color: Colors.green,
-                        fontFamily: "monospace",
+                        fontFamily: 'monospace',
                       ),
                     ),
                   ),
