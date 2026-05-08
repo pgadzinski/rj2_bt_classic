@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -35,6 +36,14 @@ class BluetoothPage extends StatefulWidget {
 }
 
 class _BluetoothPageState extends State<BluetoothPage> {
+  static const bool _verboseBleLogs = true;
+
+  void _bleLog(String message) {
+    if (!kDebugMode || !_verboseBleLogs) return;
+    final ts = DateTime.now().toIso8601String();
+    print('[$ts][BLE] $message');
+  }
+
   // --- BLE UUIDs as [Guid] for comparisons against discovered services/chars ---
   static final Guid _gattService = Guid(kServiceUuid);
   static final Guid _gattCharacteristic = Guid(kCharacteristicUuid);
@@ -64,6 +73,9 @@ class _BluetoothPageState extends State<BluetoothPage> {
   StreamSubscription<BluetoothConnectionState>? _connectionSubscription;
   StreamSubscription<List<int>>? _notifySubscription;
 
+  /// Helps reduce scan log spam while still printing “new” devices.
+  final Set<String> _seenScanIds = <String>{};
+
   @override
   void initState() {
     super.initState();
@@ -72,12 +84,14 @@ class _BluetoothPageState extends State<BluetoothPage> {
 
   /// Android / runtime BLE-related permissions (location still commonly required for scan on older stacks).
   Future<void> requestPermissions() async {
-    await [
+    final statuses = await [
       Permission.bluetooth,
       Permission.bluetoothConnect,
       Permission.bluetoothScan,
       Permission.location,
     ].request();
+
+    _bleLog('permissions: ${statuses.map((k, v) => MapEntry(k.toString(), v.toString()))}');
   }
 
   String _deviceLabel(BluetoothDevice d) {
@@ -97,17 +111,20 @@ class _BluetoothPageState extends State<BluetoothPage> {
 
   /// Subscribe to adapter state, scan results, and scanning flag; kick off first scan when radio is on.
   Future<void> initBluetooth() async {
+    _bleLog('initBluetooth()');
     await requestPermissions();
 
     final supported = await FlutterBluePlus.isSupported;
     if (!supported) {
-      debugPrint('Bluetooth LE not supported on this device');
+      _bleLog('Bluetooth LE not supported on this device');
       return;
     }
+    _bleLog('supported: $supported, adapterStateNow: ${FlutterBluePlus.adapterStateNow}');
 
     _adapterSubscription = FlutterBluePlus.adapterState.listen((state) {
       if (!mounted) return;
       setState(() => adapterState = state);
+      _bleLog('adapterState: $state');
       if (state == BluetoothAdapterState.on) {
         unawaited(_startScan());
       }
@@ -115,6 +132,22 @@ class _BluetoothPageState extends State<BluetoothPage> {
 
     _scanResultsSubscription = FlutterBluePlus.scanResults.listen((results) {
       if (!mounted) return;
+      _bleLog('scanResults: ${results.length} results');
+
+      // Print each newly-seen peripheral with as much info as FlutterBluePlus provides.
+      for (final r in results) {
+        final id = r.device.remoteId.str;
+        if (_seenScanIds.add(id)) {
+          _bleLog(
+            'FOUND id=$id '
+            'platformName="${r.device.platformName}" advName="${r.device.advName}" '
+            'rssi=${r.rssi} '
+            'connectable=${r.advertisementData.connectable} '
+            'serviceUuids=${r.advertisementData.serviceUuids.map((e) => e.str).toList()}',
+          );
+        }
+      }
+
       final byId = <String, BluetoothDevice>{};
       for (final r in results) {
         byId[r.device.remoteId.str] = r.device;
@@ -127,14 +160,16 @@ class _BluetoothPageState extends State<BluetoothPage> {
     _scanningSubscription = FlutterBluePlus.isScanning.listen((scanning) {
       if (!mounted) return;
       setState(() => isScanning = scanning);
+      _bleLog('isScanning: $scanning');
     });
 
     // Turn radio on (Android); no-op / unsupported elsewhere.
     if (FlutterBluePlus.adapterStateNow == BluetoothAdapterState.off) {
       try {
+        _bleLog('turnOn() requested');
         await FlutterBluePlus.turnOn();
       } catch (e) {
-        debugPrint('Could not turn Bluetooth on: $e');
+        _bleLog('Could not turn Bluetooth on: $e');
       }
     } else {
       await _startScan();
@@ -145,13 +180,15 @@ class _BluetoothPageState extends State<BluetoothPage> {
   Future<void> _startScan() async {
     if (adapterState != BluetoothAdapterState.on) return;
     try {
+      _bleLog('_startScan() (15s timeout)');
+      _seenScanIds.clear();
       // Scan all peripherals; the custom service UUID is matched after connect in [_setupGatt].
       // To narrow results, pass `withServices: [_gattService]` if your board advertises that UUID.
       await FlutterBluePlus.startScan(
         timeout: const Duration(seconds: 15),
       );
     } catch (e) {
-      debugPrint('startScan error: $e');
+      _bleLog('startScan error: $e');
     }
   }
 
@@ -160,12 +197,16 @@ class _BluetoothPageState extends State<BluetoothPage> {
 
   /// Finds the command characteristic, enables notifications when available, and wires disconnect cleanup.
   Future<void> _setupGatt(BluetoothDevice device) async {
+    _bleLog('discoverServices() on id=${device.remoteId.str} label="${_deviceLabel(device)}"');
     await device.discoverServices();
+    _bleLog('services discovered: ${device.servicesList.length}');
 
     BluetoothCharacteristic? target;
     for (final service in device.servicesList) {
+      _bleLog('service: ${service.uuid.str}, chars=${service.characteristics.length}');
       if (service.uuid != _gattService) continue;
       for (final c in service.characteristics) {
+        _bleLog('  char: ${c.uuid.str} props=${c.properties}');
         if (c.uuid == _gattCharacteristic) {
           target = c;
           break;
@@ -184,6 +225,7 @@ class _BluetoothPageState extends State<BluetoothPage> {
     }
 
     _commandCharacteristic = target;
+    _bleLog('command characteristic ready: ${target.uuid.str} props=${target.properties}');
     await _subscribeNotificationsIfNeeded(target);
   }
 
@@ -194,16 +236,17 @@ class _BluetoothPageState extends State<BluetoothPage> {
 
     final props = ch.properties;
     if (!props.notify && !props.indicate) {
-      debugPrint('Characteristic has no notify/indicate; console will only show local writes if any.');
+      _bleLog('Characteristic has no notify/indicate; console will only show local writes if any.');
       return;
     }
 
+    _bleLog('enabling notifications for char=${ch.uuid.str}');
     await ch.setNotifyValue(true);
     _notifySubscription = ch.onValueReceived.listen((value) {
       if (!mounted) return;
       final msg = utf8.decode(value, allowMalformed: true);
       setState(() => receivedData += msg);
-      debugPrint('Received: $msg');
+      _bleLog('notify bytes=${value.length} decoded="$msg" raw=$value');
     });
   }
 
@@ -218,6 +261,7 @@ class _BluetoothPageState extends State<BluetoothPage> {
 
   /// Clears GATT state and subscriptions after a drop or explicit disconnect.
   void _tearDownSession() {
+    _bleLog('_tearDownSession()');
     _notifySubscription?.cancel();
     _notifySubscription = null;
     _connectionSubscription?.cancel();
@@ -232,32 +276,36 @@ class _BluetoothPageState extends State<BluetoothPage> {
   Future<void> connect() async {
     if (selectedDevice == null) return;
     if (adapterState != BluetoothAdapterState.on) {
-      debugPrint('Bluetooth adapter is not on');
+      _bleLog('connect() blocked: adapterState=$adapterState');
       return;
     }
 
     try {
+      _bleLog('stopScan() before connect');
       await FlutterBluePlus.stopScan();
       final device = selectedDevice!;
+      _bleLog('connect() -> id=${device.remoteId.str} platformName="${device.platformName}" advName="${device.advName}"');
 
       await device.connect(
         license: License.free,
         timeout: const Duration(seconds: 35),
         mtu: null,
       );
+      _bleLog('connected: ${device.isConnected}');
 
       await _setupGatt(device);
       _listenForDisconnect(device);
 
       if (mounted) setState(() => isConnected = true);
+      _bleLog('READY (isConnected=true)');
     } on FlutterBluePlusException catch (e) {
-      debugPrint('connect failed: $e');
+      _bleLog('connect failed (FlutterBluePlusException): $e');
       _tearDownSession();
       try {
         await selectedDevice?.disconnect();
       } catch (_) {}
     } catch (e) {
-      debugPrint('connect failed: $e');
+      _bleLog('connect failed: $e');
       _tearDownSession();
       try {
         await selectedDevice?.disconnect();
@@ -267,6 +315,7 @@ class _BluetoothPageState extends State<BluetoothPage> {
 
   /// Disconnect from the peripheral and release notify subscription.
   Future<void> disconnect() async {
+    _bleLog('disconnect() requested');
     await _notifySubscription?.cancel();
     _notifySubscription = null;
     _connectionSubscription?.cancel();
@@ -276,10 +325,11 @@ class _BluetoothPageState extends State<BluetoothPage> {
     try {
       await selectedDevice?.disconnect();
     } catch (e) {
-      debugPrint('disconnect: $e');
+      _bleLog('disconnect error: $e');
     }
 
     if (mounted) setState(() => isConnected = false);
+    _bleLog('disconnected (isConnected=false)');
   }
 
   /// Sends `S1:<angle>\\n` over BLE write (same semantics as before: one slider → servo 1).
@@ -294,9 +344,11 @@ class _BluetoothPageState extends State<BluetoothPage> {
     final bool withoutResponse = props.writeWithoutResponse && !props.write;
 
     try {
+      _bleLog('write -> char=${ch.uuid.str} withoutResponse=$withoutResponse value="$value" bytes=$bytes');
       await ch.write(bytes, withoutResponse: withoutResponse);
+      _bleLog('write OK');
     } catch (e) {
-      debugPrint('write failed: $e');
+      _bleLog('write failed: $e');
     }
   }
 
@@ -421,6 +473,9 @@ class _BluetoothPageState extends State<BluetoothPage> {
                         }).toList(),
                   onChanged: (d) {
                     setState(() => selectedDevice = d);
+                    if (d != null) {
+                      _bleLog('selectedDevice: id=${d.remoteId.str} platformName="${d.platformName}" advName="${d.advName}"');
+                    }
                   },
                 ),
               ),
@@ -498,7 +553,7 @@ class _BluetoothPageState extends State<BluetoothPage> {
               ),
 
               const SizedBox(height: 15),
-
+               
               Expanded(
                 child: Container(
                   padding: const EdgeInsets.all(12),
