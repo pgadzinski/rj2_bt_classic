@@ -13,6 +13,15 @@ class BluetoothController extends GetxController {
   static const bool _verboseBleLogs = true;
   static const Duration kScanTimeout = Duration(seconds: 15);
 
+  /// Android GATT timing (esp. API 35+): space out ATT operations.
+  static const Duration _androidPostConnectDelay = Duration(milliseconds: 280);
+  static const Duration _androidPostMtuDelay = Duration(milliseconds: 180);
+  static const Duration _androidPostDiscoverDelay = Duration(milliseconds: 220);
+  static const Duration _androidPreNotifyDelay = Duration(milliseconds: 160);
+  static const Duration _notifyRetryBaseDelay = Duration(milliseconds: 380);
+  static const int _notifyMaxAttempts = 4;
+  static const int _desiredAndroidMtu = 517;
+
   static final Guid _gattService = Guid(kServiceUuid);
   static final Guid _gattCharacteristic = Guid(kCharacteristicUuid);
 
@@ -41,6 +50,65 @@ class BluetoothController extends GetxController {
     if (!kDebugMode || !_verboseBleLogs) return;
     final ts = DateTime.now().toIso8601String();
     print('[$ts][BLE] $message');
+  }
+
+  /// BLE paths that need Android sequencing (avoid `dart:io` — keeps analyzer/web happy).
+  bool get _isAndroidBle =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+
+  Future<void> _androidConnectionPipeline(BluetoothDevice device) async {
+    if (!_isAndroidBle) return;
+
+    await Future.delayed(_androidPostConnectDelay);
+    try {
+      await device.requestConnectionPriority(
+        connectionPriorityRequest: ConnectionPriority.high,
+      );
+      _bleLog('requestConnectionPriority: high');
+    } catch (e) {
+      _bleLog('requestConnectionPriority skipped: $e');
+    }
+
+    try {
+      final mtu = await device.requestMtu(
+        _desiredAndroidMtu,
+        predelay: 0.55,
+        timeout: 25,
+      );
+      _bleLog('requestMtu ok: $mtu');
+    } catch (e) {
+      _bleLog('requestMtu failed (continuing): $e');
+    }
+    await Future.delayed(_androidPostMtuDelay);
+  }
+
+  Future<void> _setNotifyWithRetries(BluetoothCharacteristic ch) async {
+    Future<void> once() => ch.setNotifyValue(true);
+
+    if (!_isAndroidBle) {
+      await once();
+      return;
+    }
+
+    for (var attempt = 1; attempt <= _notifyMaxAttempts; attempt++) {
+      try {
+        if (attempt > 1) {
+          final backoff = _notifyRetryBaseDelay * (attempt - 1);
+          await Future.delayed(backoff);
+        }
+        await once();
+        return;
+      } on FlutterBluePlusException catch (e) {
+        final isGatt133 =
+            e.code == 133 && e.function == 'setNotifyValue';
+        _bleLog(
+          'setNotifyValue attempt $attempt/$_notifyMaxAttempts: $e',
+        );
+        if (!isGatt133 || attempt == _notifyMaxAttempts) {
+          rethrow;
+        }
+      }
+    }
   }
 
   void _scanDebugAppend(String message) {
@@ -215,8 +283,12 @@ class BluetoothController extends GetxController {
     _bleLog(
       'discoverServices() on id=${device.remoteId.str} label="${deviceLabel(device)}"',
     );
-    await device.discoverServices();
+    await device.discoverServices(subscribeToServicesChanged: false);
     _bleLog('services discovered: ${device.servicesList.length}');
+
+    if (_isAndroidBle) {
+      await Future.delayed(_androidPostDiscoverDelay);
+    }
 
     BluetoothCharacteristic? target;
     for (final service in device.servicesList) {
@@ -265,7 +337,10 @@ class BluetoothController extends GetxController {
     }
 
     _bleLog('enabling notifications for char=${ch.uuid.str}');
-    await ch.setNotifyValue(true);
+    if (_isAndroidBle) {
+      await Future.delayed(_androidPreNotifyDelay);
+    }
+    await _setNotifyWithRetries(ch);
     _notifySubscription = ch.onValueReceived.listen((value) {
       if (isClosed) return;
       final msg = utf8.decode(value, allowMalformed: true);
@@ -311,6 +386,10 @@ class BluetoothController extends GetxController {
         _endScanDebugSession('connect requested');
       }
       await FlutterBluePlus.stopScan();
+      if (_isAndroidBle) {
+        await Future.delayed(const Duration(milliseconds: 120));
+      }
+
       final device = selectedDevice.value!;
       _bleLog(
         'connect() -> id=${device.remoteId.str} platformName="${device.platformName}" advName="${device.advName}"',
@@ -323,6 +402,7 @@ class BluetoothController extends GetxController {
       );
       _bleLog('connected: ${device.isConnected}');
 
+      await _androidConnectionPipeline(device);
       await _setupGatt(device);
       _listenForDisconnect(device);
 
