@@ -3,6 +3,7 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:get/get.dart';
 
 import '../controllers/bluetooth_controller.dart';
+import 'ble_debug_page.dart';
 
 class BluetoothPage extends GetView<BluetoothController> {
   const BluetoothPage({super.key});
@@ -191,7 +192,18 @@ class BluetoothPage extends GetView<BluetoothController> {
                   ),
                 ),
 
-                const SizedBox(height: 15),
+                const SizedBox(height: 12),
+
+                OutlinedButton.icon(
+                  onPressed: () => Get.to(() => const BleDebugPage()),
+                  icon: const Icon(Icons.bug_report_outlined),
+                  label: const Text('Open debug log'),
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                  ),
+                ),
+
+                const SizedBox(height: 12),
 
                 Expanded(
                   child: Container(
@@ -210,69 +222,6 @@ class BluetoothPage extends GetView<BluetoothController> {
                           fontFamily: 'monospace',
                         ),
                       ),
-                    ),
-                  ),
-                ),
-
-                const SizedBox(height: 12),
-
-                Material(
-                  elevation: 1,
-                  borderRadius: BorderRadius.circular(12),
-                  color: Colors.grey.shade200,
-                  child: Padding(
-                    padding: const EdgeInsets.all(10),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        Row(
-                          children: [
-                            Icon(Icons.bug_report,
-                                size: 20, color: Colors.grey.shade800),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Text(
-                                'Scan debug (last run — send copy if device missing)',
-                                style: TextStyle(
-                                  fontWeight: FontWeight.w600,
-                                  fontSize: 13,
-                                  color: Colors.grey.shade900,
-                                ),
-                              ),
-                            ),
-                            IconButton(
-                              tooltip: 'Copy scan debug log',
-                              icon: const Icon(Icons.copy),
-                              onPressed: c.copyScanDebugToClipboard,
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 6),
-                        SizedBox(
-                          height: 120,
-                          child: DecoratedBox(
-                            decoration: BoxDecoration(
-                              color: Colors.white,
-                              borderRadius: BorderRadius.circular(8),
-                              border: Border.all(color: Colors.grey.shade400),
-                            ),
-                            child: SingleChildScrollView(
-                              padding: const EdgeInsets.all(8),
-                              child: SelectableText(
-                                c.scanSessionDebug.value.isEmpty
-                                    ? 'Run “Scan BLE” — timestamps, batches, and FOUND lines appear here for that run.'
-                                    : c.scanSessionDebug.value.trimRight(),
-                                style: TextStyle(
-                                  fontFamily: 'monospace',
-                                  fontSize: 11,
-                                  height: 1.35,
-                                  color: Colors.grey.shade900,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
                     ),
                   ),
                 ),

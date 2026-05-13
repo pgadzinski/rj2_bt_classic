@@ -15,12 +15,10 @@ class BluetoothController extends GetxController {
 
   /// Android GATT timing (esp. API 35+): space out ATT operations.
   static const Duration _androidPostConnectDelay = Duration(milliseconds: 280);
-  static const Duration _androidPostMtuDelay = Duration(milliseconds: 180);
   static const Duration _androidPostDiscoverDelay = Duration(milliseconds: 220);
   static const Duration _androidPreNotifyDelay = Duration(milliseconds: 160);
   static const Duration _notifyRetryBaseDelay = Duration(milliseconds: 380);
   static const int _notifyMaxAttempts = 4;
-  static const int _desiredAndroidMtu = 517;
 
   static final Guid _gattService = Guid(kServiceUuid);
   static final Guid _gattCharacteristic = Guid(kCharacteristicUuid);
@@ -34,6 +32,15 @@ class BluetoothController extends GetxController {
   final adapterState = BluetoothAdapterState.unknown.obs;
   final scanSessionDebug = ''.obs;
 
+  /// Rolling in-app BLE log (same lines as console when verbose). Trimmed to cap size.
+  final bleAppDebugLog = ''.obs;
+  static const int _maxBleAppDebugChars = 14000;
+  final StringBuffer _bleAppDebugBuffer = StringBuffer();
+
+  /// Toggle notify subscription (CCCD writes) on/off.
+  /// Default: OFF to avoid GATT 133 on some Android 16 stacks.
+  final notificationsEnabled = false.obs;
+
   BluetoothCharacteristic? _commandCharacteristic;
   StreamSubscription<List<ScanResult>>? _scanResultsSubscription;
   StreamSubscription<BluetoothAdapterState>? _adapterSubscription;
@@ -46,40 +53,39 @@ class BluetoothController extends GetxController {
   bool _scanDebugRecording = false;
   Timer? _scanDebugEndTimer;
 
+  void _appendBleAppDebugLine(String line) {
+    _bleAppDebugBuffer.writeln(line);
+    var text = _bleAppDebugBuffer.toString();
+    if (text.length > _maxBleAppDebugChars) {
+      text = text.substring(text.length - _maxBleAppDebugChars);
+      _bleAppDebugBuffer
+        ..clear()
+        ..write(text);
+    }
+    bleAppDebugLog.value = _bleAppDebugBuffer.toString();
+  }
+
   void _bleLog(String message) {
-    if (!kDebugMode || !_verboseBleLogs) return;
+    if (!_verboseBleLogs) return;
     final ts = DateTime.now().toIso8601String();
-    print('[$ts][BLE] $message');
+    final line = '[$ts][BLE] $message';
+    _appendBleAppDebugLine(line);
+    if (kDebugMode) {
+      print(line);
+    }
   }
 
   /// BLE paths that need Android sequencing (avoid `dart:io` — keeps analyzer/web happy).
   bool get _isAndroidBle =>
       !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
 
-  Future<void> _androidConnectionPipeline(BluetoothDevice device) async {
+  /// Short settle after connect (Android OEM timing).
+  Future<void> _androidPostConnectSettle(BluetoothDevice device) async {
     if (!_isAndroidBle) return;
-
     await Future.delayed(_androidPostConnectDelay);
-    try {
-      await device.requestConnectionPriority(
-        connectionPriorityRequest: ConnectionPriority.high,
-      );
-      _bleLog('requestConnectionPriority: high');
-    } catch (e) {
-      _bleLog('requestConnectionPriority skipped: $e');
+    if (!device.isConnected) {
+      _bleLog('post-connect settle: device already disconnected');
     }
-
-    try {
-      final mtu = await device.requestMtu(
-        _desiredAndroidMtu,
-        predelay: 0.55,
-        timeout: 25,
-      );
-      _bleLog('requestMtu ok: $mtu');
-    } catch (e) {
-      _bleLog('requestMtu failed (continuing): $e');
-    }
-    await Future.delayed(_androidPostMtuDelay);
   }
 
   Future<void> _setNotifyWithRetries(BluetoothCharacteristic ch) async {
@@ -280,21 +286,42 @@ class BluetoothController extends GetxController {
   }
 
   Future<void> _setupGatt(BluetoothDevice device) async {
-    _bleLog(
-      'discoverServices() on id=${device.remoteId.str} label="${deviceLabel(device)}"',
-    );
-    await device.discoverServices(subscribeToServicesChanged: false);
-    _bleLog('services discovered: ${device.servicesList.length}');
+    final id = device.remoteId.str;
+    _bleLog('GATT setup START id=$id label="${deviceLabel(device)}"');
 
+    // 1) Discover services (retry helps OEM stacks that race right after connect)
+    const int discoverAttempts = 3;
+    Object? lastDiscoverError;
+    for (var attempt = 1; attempt <= discoverAttempts; attempt++) {
+      try {
+        _bleLog('discoverServices attempt $attempt/$discoverAttempts');
+        await device.discoverServices(subscribeToServicesChanged: false);
+        lastDiscoverError = null;
+        break;
+      } catch (e) {
+        lastDiscoverError = e;
+        _bleLog('discoverServices failed attempt $attempt: $e');
+        if (attempt < discoverAttempts) {
+          await Future.delayed(Duration(milliseconds: 180 * attempt));
+        }
+      }
+    }
+    if (lastDiscoverError != null) {
+      _bleLog('GATT setup ABORT: discoverServices failed: $lastDiscoverError');
+      throw lastDiscoverError;
+    }
+
+    _bleLog('services discovered: ${device.servicesList.length}');
     if (_isAndroidBle) {
       await Future.delayed(_androidPostDiscoverDelay);
     }
 
+    // 2) Find target characteristic
     BluetoothCharacteristic? target;
+    int totalChars = 0;
     for (final service in device.servicesList) {
-      _bleLog(
-        'service: ${service.uuid.str}, chars=${service.characteristics.length}',
-      );
+      totalChars += service.characteristics.length;
+      _bleLog('service: ${service.uuid.str}, chars=${service.characteristics.length}');
       if (service.uuid != _gattService) continue;
       for (final c in service.characteristics) {
         _bleLog('  char: ${c.uuid.str} props=${c.properties}');
@@ -305,21 +332,32 @@ class BluetoothController extends GetxController {
       }
       if (target != null) break;
     }
+    _bleLog('characteristics scanned: $totalChars');
 
     if (target == null) {
+      final msg =
+          'Service $kServiceUuid or characteristic $kCharacteristicUuid not found';
+      _bleLog('GATT setup FAILED: $msg');
       throw FlutterBluePlusException(
         ErrorPlatform.fbp,
         'setupGatt',
         FbpErrorCode.characteristicNotFound.index,
-        'Service $kServiceUuid or characteristic $kCharacteristicUuid not found',
+        msg,
       );
     }
 
+    // 3) Subscribe (if enabled) — log failures but keep characteristic available for writes
     _commandCharacteristic = target;
-    _bleLog(
-      'command characteristic ready: ${target.uuid.str} props=${target.properties}',
-    );
-    await _subscribeNotificationsIfNeeded(target);
+    _bleLog('command characteristic ready: ${target.uuid.str} props=${target.properties}');
+    try {
+      await _subscribeNotificationsIfNeeded(target);
+      _bleLog('GATT setup END: notify setup OK');
+    } on FlutterBluePlusException catch (e) {
+      _bleLog('GATT setup WARN: notify setup failed: $e');
+      // keep connected; writes can still work even if notify fails
+    } catch (e) {
+      _bleLog('GATT setup WARN: unexpected notify error: $e');
+    }
   }
 
   Future<void> _subscribeNotificationsIfNeeded(
@@ -327,6 +365,11 @@ class BluetoothController extends GetxController {
   ) async {
     await _notifySubscription?.cancel();
     _notifySubscription = null;
+
+    if (!notificationsEnabled.value) {
+      _bleLog('notifications disabled by flag; skipping setNotifyValue()');
+      return;
+    }
 
     final props = ch.properties;
     if (!props.notify && !props.indicate) {
@@ -402,7 +445,7 @@ class BluetoothController extends GetxController {
       );
       _bleLog('connected: ${device.isConnected}');
 
-      await _androidConnectionPipeline(device);
+      await _androidPostConnectSettle(device);
       await _setupGatt(device);
       _listenForDisconnect(device);
 
@@ -461,21 +504,67 @@ class BluetoothController extends GetxController {
     }
   }
 
-  Future<void> copyScanDebugToClipboard() async {
-    final text = scanSessionDebug.value.trim();
-    if (text.isEmpty) {
+  /// Clears on-screen unified debug (scan session buffer + BLE `_bleLog` buffer).
+  void clearUnifiedDebug() {
+    _scanSessionBuffer.clear();
+    scanSessionDebug.value = '';
+    _bleAppDebugBuffer.clear();
+    bleAppDebugLog.value = '';
+    Get.snackbar(
+      '',
+      'Debug list cleared',
+      snackPosition: SnackPosition.BOTTOM,
+      duration: const Duration(seconds: 2),
+    );
+  }
+
+  /// One panel: last scan session + rolling BLE `_bleLog` lines.
+  String unifiedDebugDisplay() {
+    final scan = scanSessionDebug.value.trimRight();
+    final ble = bleAppDebugLog.value.trimRight();
+    if (scan.isEmpty && ble.isEmpty) {
+      return 'Tap “Scan BLE” for scan output.\n\n'
+          'BLE events (connect, GATT, writes) append here as they happen.';
+    }
+    final b = StringBuffer();
+    if (scan.isNotEmpty) {
+      b.writeln('── Scan (last run) ──');
+      b.writeln(scan);
+    }
+    if (ble.isNotEmpty) {
+      if (b.isNotEmpty) b.writeln();
+      b.writeln('── BLE log (session) ──');
+      b.writeln(ble);
+    }
+    return b.toString().trimRight();
+  }
+
+  Future<void> copyUnifiedDebugToClipboard() async {
+    final scan = scanSessionDebug.value.trim();
+    final ble = bleAppDebugLog.value.trim();
+    if (scan.isEmpty && ble.isEmpty) {
       Get.snackbar(
         '',
-        'No scan debug yet — tap Scan BLE first',
+        'Nothing to copy yet — use Scan / Connect first',
         snackPosition: SnackPosition.BOTTOM,
         duration: const Duration(seconds: 2),
       );
       return;
     }
-    await Clipboard.setData(ClipboardData(text: text));
+    final buf = StringBuffer();
+    if (scan.isNotEmpty) {
+      buf.writeln('── Scan (last run) ──');
+      buf.writeln(scan);
+    }
+    if (ble.isNotEmpty) {
+      if (buf.isNotEmpty) buf.writeln();
+      buf.writeln('── BLE log (session) ──');
+      buf.writeln(ble);
+    }
+    await Clipboard.setData(ClipboardData(text: buf.toString().trim()));
     Get.snackbar(
       '',
-      'Scan debug copied',
+      'Debug copied',
       snackPosition: SnackPosition.BOTTOM,
       duration: const Duration(seconds: 2),
     );
@@ -484,6 +573,8 @@ class BluetoothController extends GetxController {
   @override
   void onInit() {
     super.onInit();
+    _bleAppDebugBuffer.clear();
+    bleAppDebugLog.value = '';
     initBluetooth().catchError((Object e, StackTrace st) {
       _bleLog('initBluetooth: $e');
     });

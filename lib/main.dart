@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
-
 import 'bindings/bluetooth_binding.dart';
 import 'pages/bluetooth_page.dart';
 
